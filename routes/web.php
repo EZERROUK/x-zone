@@ -28,16 +28,25 @@ use Spatie\Activitylog\Models\Activity;
 
 /*
 |--------------------------------------------------------------------------
-| Accueil public
+| Accueil public + Tenant selection
 |--------------------------------------------------------------------------
 */
 Route::get('/', fn () => Redirect::route('login'))->name('home');
+
+// Sélection/création de tenant
+Route::middleware('auth')->group(function () {
+    Route::get('/tenant/select', [App\Http\Controllers\TenantController::class, 'select'])->name('tenant.select');
+    Route::get('/tenant/create', [App\Http\Controllers\TenantController::class, 'create'])->name('tenant.create');
+    Route::post('/tenant', [App\Http\Controllers\TenantController::class, 'store'])->name('tenant.store');
+    Route::post('/tenant/switch', [App\Http\Controllers\TenantController::class, 'switch'])->name('tenant.switch');
+});
+
 /*
 |--------------------------------------------------------------------------
-| Zone protégée (auth + verified)
+| Zone protégée (auth + verified + tenant)
 |--------------------------------------------------------------------------
 */
-Route::middleware(['auth', 'verified'])->group(function () {
+Route::middleware(['auth', 'verified', \App\Http\Middleware\EnsureTenantAccess::class])->group(function () {
 
     /* ------------------------------------------------------------------ */
     /* Dashboard                                                          */
