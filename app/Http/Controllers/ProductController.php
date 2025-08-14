@@ -242,7 +242,7 @@ class ProductController extends Controller
     {
         return Inertia::render('Products/Create', [
             'brands'     => Brand::orderBy('name')->get(['id', 'name']),
-            'categories' => Category::orderBy('name')->get(['id', 'name', 'slug']),
+            'categories' => Category::active()->withActiveAttributes()->orderBy('name')->get(),
             'currencies' => Currency::all(['code', 'symbol']),
             'taxRates'   => TaxRate::all(['id', 'name', 'rate']),
         ]);
@@ -251,23 +251,31 @@ class ProductController extends Controller
     public function store(ProductRequest $request): RedirectResponse
     {
         $validated = $request->validated();
-        $category  = Category::findOrFail($validated['category_id']);
-        $slug      = $category->slug;
-        $config    = config('catalog.specializations');
+        $product = Product::create([
+            ...$validated, 
+            'id' => (string) Str::uuid(),
+            'slug' => $validated['slug'] ?? Str::slug($validated['name'])
+        ]);
 
-        $product = Product::create([...$validated, 'id' => (string) Str::uuid()]);
+        // Sauvegarder les attributs personnalisés
+        if (isset($validated['attributes'])) {
+            foreach ($validated['attributes'] as $attributeSlug => $value) {
+                if ($value !== null && $value !== '') {
+                    $product->setAttributeValue($attributeSlug, $value);
+                }
+            }
+        }
 
-        if (isset($config[$slug]) && isset($validated['spec'])) {
-            $modelClass = $config[$slug]['model'] ?? null;
-            $fields     = $config[$slug]['fields'] ?? [];
+        // Gérer les catégories multiples
+        if (isset($validated['additional_categories'])) {
+            $categories = collect($validated['additional_categories'])
+                ->push($validated['category_id'])
+                ->unique();
 
-            $specData = array_merge($fields, $validated['spec'], ['product_id' => $product->id]);
-            $relation = Str::camel(Str::singular($slug));
-
-            if (method_exists($product, $relation) && method_exists($product->{$relation}(), 'create')) {
-                $product->{$relation}()->create($specData);
-            } elseif ($modelClass && class_exists($modelClass)) {
-                $modelClass::create($specData);
+            foreach ($categories as $index => $categoryId) {
+                $product->categories()->attach($categoryId, [
+                    'is_primary' => $categoryId == $validated['category_id']
+                ]);
             }
         }
 
@@ -289,11 +297,13 @@ class ProductController extends Controller
     public function show(Product $product): Response
     {
         $product->load([
-            'brand','category','currency','taxRate','images',
-            'ram','processor','hardDrive','powerSupply','motherboard','networkCard',
-            'graphicCard','license','software','accessory','laptop','desktop','server',
+            'brand','category','currency','taxRate','images','categories',
+            'attributeValues.attribute.options',
             'compatibleWith.category','isCompatibleWith.category',
         ]);
+
+        // Récupérer les attributs avec leurs valeurs
+        $attributes = $product->getAttributesForCategory();
 
         $all = collect();
 
@@ -317,32 +327,31 @@ class ProductController extends Controller
         }
 
         $allCompatibilities = $all->unique('id')->values();
-        $base = $product->toArray();
-        $config = config('catalog.specializations');
-
-        foreach ($config as $slug => $_) {
-            $relation = Str::camel(Str::singular($slug));
-            if ($product->relationLoaded($relation)) {
-                $base[$relation] = $product->getRelation($relation);
-            }
-        }
 
         return Inertia::render('Products/Show', [
-            'product' => $base,
+            'product' => array_merge($product->toArray(), [
+                'image_url' => $product->image_main ? asset('storage/' . $product->image_main) : null,
+                'formatted_price' => $product->getFormattedPrice(),
+                'has_discount' => $product->hasDiscount(),
+                'discount_percentage' => $product->getDiscountPercentage(),
+                'is_in_stock' => $product->isInStock(),
+                'is_low_stock' => $product->isLowStock(),
+                'is_available' => $product->isAvailable(),
+            ]),
+            'attributes' => $attributes,
             'allCompatibilities' => $allCompatibilities,
         ]);
     }
 
     public function edit(Product $product): Response
     {
-        $slug = $product->category?->slug;
-        $relations = ['brand', 'category', 'currency', 'taxRate', 'images'];
+        $product->load([
+            'brand', 'category', 'currency', 'taxRate', 'images', 'categories',
+            'attributeValues.attribute.options', 'compatibleWith', 'isCompatibleWith'
+        ]);
 
-        if ($slug) {
-            $relations[] = Str::camel(Str::singular($slug));
-        }
-
-        $product->load(array_merge($relations, ['compatibleWith', 'isCompatibleWith']));
+        // Récupérer les attributs avec leurs valeurs actuelles
+        $attributes = $product->getAttributesForCategory();
 
         $compatibilities = $product->compatibleWith
             ->merge($product->isCompatibleWith)
@@ -357,9 +366,10 @@ class ProductController extends Controller
         return Inertia::render('Products/Edit', [
             'brands' => Brand::orderBy('name')->get(['id', 'name']),
             'product' => $product,
-            'categories' => Category::orderBy('name')->get(['id', 'name', 'slug']),
+            'categories' => Category::active()->withActiveAttributes()->orderBy('name')->get(),
             'currencies' => Currency::all(['code', 'symbol']),
             'taxRates' => TaxRate::all(['id', 'name', 'rate']),
+            'attributes' => $attributes,
             'compatibilities' => $compatibilities,
         ]);
     }
@@ -368,20 +378,41 @@ class ProductController extends Controller
     {
         DB::transaction(function () use ($request, $product) {
             $validated = $request->validated();
+            
+            if (empty($validated['slug'])) {
+                $validated['slug'] = Str::slug($validated['name']);
+            }
+            
             $product->update($validated);
 
-            $category = Category::findOrFail($validated['category_id']);
-            $slug = $category->slug;
-            $config = config('catalog.specializations');
+            // Sauvegarder les attributs personnalisés
+            if (isset($validated['attributes'])) {
+                foreach ($validated['attributes'] as $attributeSlug => $value) {
+                    if ($value !== null && $value !== '') {
+                        $product->setAttributeValue($attributeSlug, $value);
+                    } else {
+                        // Supprimer la valeur si elle est vide
+                        $product->attributeValues()
+                            ->whereHas('attribute', function ($q) use ($attributeSlug) {
+                                $q->where('slug', $attributeSlug);
+                            })
+                            ->delete();
+                    }
+                }
+            }
 
-            if (isset($config[$slug]) && isset($validated['spec'])) {
-                $relation = Str::camel(Str::singular($slug));
+            // Gérer les catégories multiples
+            if (isset($validated['additional_categories'])) {
+                $product->categories()->detach();
+                
+                $categories = collect($validated['additional_categories'])
+                    ->push($validated['category_id'])
+                    ->unique();
 
-                if (method_exists($product, $relation)) {
-                    $product->{$relation}()->updateOrCreate(
-                        ['product_id' => $product->id],
-                        $validated['spec']
-                    );
+                foreach ($categories as $categoryId) {
+                    $product->categories()->attach($categoryId, [
+                        'is_primary' => $categoryId == $validated['category_id']
+                    ]);
                 }
             }
 

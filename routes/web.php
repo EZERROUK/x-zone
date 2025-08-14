@@ -1,305 +1,529 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
-use Illuminate\Support\Facades\Redirect;
-use Inertia\Inertia;
-use App\Http\Controllers\{
-    UserController,
-    RoleController,
-    PermissionController,
-    CategoryController,
-    ProductController,
-    AuditLogExportController,
-    LoginLogController,
-    LoginLogExportController,
-    TaxRateController,
-    CurrencyController,
-    AppSettingController,
-    AuditLogController,
-    StockMovementController,
-    ProviderController,
-    QuoteController,
-    ClientController,
-    OrderController,
-    StockMovementReasonController,
-    InvoiceController,
+namespace App\Http\Controllers;
+
+use App\Models\{
+    Product,
+    Brand,
+    Category,
+    Currency,
+    TaxRate,
+    ProductImage,
+    ProductCompatibility
 };
-use Spatie\Activitylog\Models\Activity;
+use App\Http\Requests\ProductRequest;
+use Illuminate\Http\Request;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Support\Str;
+use Illuminate\Support\Facades\DB;
+use Inertia\Inertia;
+use Inertia\Response;
+use Carbon\Carbon;
 
-/*
-|--------------------------------------------------------------------------
-| Accueil public + Tenant selection
-|--------------------------------------------------------------------------
-*/
-Route::get('/', fn () => Redirect::route('login'))->name('home');
+class ProductController extends Controller
+{
+    public function index(Request $request): Response
+    {
+        $query = Product::query()
+            ->with(['brand:id,name', 'category:id,name', 'currency:code,symbol', 'variants']);
 
-// Sélection/création de tenant
-Route::middleware('auth')->group(function () {
-    Route::get('/tenant/select', [App\Http\Controllers\TenantController::class, 'select'])->name('tenant.select');
-    Route::get('/tenant/create', [App\Http\Controllers\TenantController::class, 'create'])->name('tenant.create');
-    Route::post('/tenant', [App\Http\Controllers\TenantController::class, 'store'])->name('tenant.store');
-    Route::post('/tenant/switch', [App\Http\Controllers\TenantController::class, 'switch'])->name('tenant.switch');
-});
+        // Recherche globale améliorée
+        if ($search = trim($request->input('search'))) {
+            foreach (preg_split('/\s+/', $search, -1, PREG_SPLIT_NO_EMPTY) as $term) {
+                $like = "%{$term}%";
+                $query->where(function ($q) use ($term, $like) {
+                    // Recherche dans les champs textuels
+                    $q->where('name', 'like', $like)
+                      ->orWhere('description', 'like', $like)
+                      ->orWhere('slug', 'like', $like)
+                      ->orWhere('meta_title', 'like', $like)
+                      ->orWhereHas('category', fn($subQ) => $subQ->where('name', 'like', $like))
+                      ->orWhereHas('brand', fn($subQ) => $subQ->where('name', 'like', $like));
 
-/*
-|--------------------------------------------------------------------------
-| Zone protégée (auth + verified + tenant)
-|--------------------------------------------------------------------------
-*/
-Route::middleware(['auth', 'verified', \App\Http\Middleware\EnsureTenantAccess::class])->group(function () {
+                    // Si c'est un nombre, rechercher aussi dans les champs numériques
+                    if (is_numeric($term)) {
+                        $numericValue = (float) $term;
+                        $intValue = (int) $term;
 
-    /* ------------------------------------------------------------------ */
-    /* Dashboard                                                          */
-    /* ------------------------------------------------------------------ */
-    Route::get('/dashboard', fn () => Inertia::render('dashboard'))->name('dashboard');
+                        $q->orWhere('price', '=', $numericValue)
+                          ->orWhere('compare_at_price', '=', $numericValue)
+                          ->orWhere('stock_quantity', '=', $intValue)
+                          // Recherche partielle dans le prix (ex: "299" trouve "299.99")
+                          ->orWhere('price', 'like', $like)
+                          // Recherche par année dans created_at
+                          ->orWhereYear('created_at', '=', $intValue);
+                    }
 
-    /* ------------------------------------------------------------------ */
-    /* Catalogue – Catégories                                             */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('categories')->name('categories.')->group(function () {
-        Route::get('/',                [CategoryController::class, 'index'  ])->middleware('permission:category_list'  )->name('index');
-        Route::get('/create',          [CategoryController::class, 'create' ])->middleware('permission:category_create')->name('create');
-        Route::post('/',               [CategoryController::class, 'store'  ])->middleware('permission:category_create')->name('store');
-        Route::get('/{category}',      [CategoryController::class, 'show'   ])->middleware('permission:category_show'  )->name('show');
-        Route::get('/{category}/edit', [CategoryController::class, 'edit'   ])->middleware('permission:category_edit'  )->name('edit');
-        Route::patch('/{category}',    [CategoryController::class, 'update' ])->middleware('permission:category_edit'  )->name('update');
-        Route::delete('/{category}',   [CategoryController::class, 'destroy'])->middleware('permission:category_delete')->name('destroy');
-        Route::post('/{id}/restore',   [CategoryController::class, 'restore'])->middleware('permission:category_restore')->name('restore');
-        Route::delete('/{id}/force-delete', [CategoryController::class, 'forceDelete'])->middleware('permission:category_delete')->name('force-delete');
-    });
+                    // Détection et traitement des formats de date
+                    $this->addDateSearchConditions($q, $term);
+                });
+            }
+        }
 
-    /* ------------------------------------------------------------------ */
-    /* Catalogue – Produits                                               */
-    /* ------------------------------------------------------------------ */
+        // Filtres e-commerce spécifiques
+        if ($type = $request->input('type')) {
+            $query->where('type', $type);
+        }
 
-    /* ------------------------------------------------------------------ */
-    /* Clients                                                            */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('clients')->name('clients.')->group(function () {
-        Route::get('/',                [ClientController::class, 'index'  ])->name('index');
-        Route::get('/create',          [ClientController::class, 'create' ])->name('create');
-        Route::post('/',               [ClientController::class, 'store'  ])->name('store');
-        Route::get('/{client}',        [ClientController::class, 'show'   ])->name('show');
-        Route::get('/{client}/edit',   [ClientController::class, 'edit'   ])->name('edit');
-        Route::patch('/{client}',      [ClientController::class, 'update' ])->name('update');
-        Route::delete('/{client}',     [ClientController::class, 'destroy'])->name('destroy');
-        Route::post('/{id}/restore',   [ClientController::class, 'restore'])->name('restore');
-    });
+        if ($visibility = $request->input('visibility')) {
+            $query->where('visibility', $visibility);
+        }
 
-    /* ------------------------------------------------------------------ */
-    /* Devis                                                              */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('quotes')->name('quotes.')->group(function () {
-        Route::get('/',                [QuoteController::class, 'index']        )->name('index');
-        Route::get('/create',          [QuoteController::class, 'create']       )->name('create');
-        Route::post('/',               [QuoteController::class, 'store']        )->name('store');
-        Route::get('/{quote}',         [QuoteController::class, 'show']         )->name('show');
-        Route::get('/{quote}/edit',    [QuoteController::class, 'edit']         )->name('edit');
-        Route::patch('/{quote}',       [QuoteController::class, 'update']       )->name('update');
-        Route::delete('/{quote}',      [QuoteController::class, 'destroy']      )->name('destroy');
+        if ($request->input('is_featured') === 'true') {
+            $query->where('is_featured', true);
+        }
 
-        // Actions spéciales
-        Route::post('/{quote}/change-status',    [QuoteController::class, 'changeStatus'])->name('change-status');
-        Route::post('/{quote}/convert-to-order', [QuoteController::class, 'convertToOrder'])->name('convert-to-order');
-        Route::post('/{quote}/convert-to-invoice', [QuoteController::class, 'convertToInvoice'])->name('convert-to-invoice');
-        Route::post('/{quote}/duplicate',        [QuoteController::class, 'duplicate'])->name('duplicate');
-        Route::get('/{quote}/export',            [QuoteController::class, 'export'])->name('export');
-    });
+        if ($request->input('low_stock') === 'true') {
+            $query->where('track_inventory', true)
+        // Filtres spécifiques
+        if ($name = $request->input('name')) {
+            $query->where('name', 'like', "%{$name}%");
+        }
 
-    /* ------------------------------------------------------------------ */
-    /* Commandes                                                          */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('orders')->name('orders.')->group(function () {
-        Route::get('/',           [OrderController::class, 'index'])->name('index');
-        Route::get('/{order}',    [OrderController::class, 'show' ])->name('show');
-    });
+        if ($cat = $request->input('category')) {
+            $query->whereHas('category', fn ($q) => $q->where('name', 'like', "%{$cat}%"));
+        }
 
-    Route::prefix('products')->name('products.')->group(function () {
+        if ($status = $request->input('status')) {
+            $status === 'actif'
+                ? $query->whereNull('deleted_at')
+                : $query->whereNotNull('deleted_at');
+        }
 
-        /* --- Route statique avant les paramètres dynamiques ------------- */
-        Route::get('/compatible-list', [ProductController::class, 'compatibleList'])
-            ->middleware('permission:product_list')
-            ->name('compatible-list');
+        // Filtres numériques pour le prix
+        if ($priceOperator = $request->input('price_operator')) {
+            if ($priceOperator === 'between') {
+                $minPrice = $request->input('price_min');
+                $maxPrice = $request->input('price_max');
+                if ($minPrice !== null && $maxPrice !== null) {
+                    $query->whereBetween('price', [(float)$minPrice, (float)$maxPrice]);
+                }
+            } else {
+                $price = $request->input('price');
+                if ($price !== null && $price !== '') {
+                    switch ($priceOperator) {
+                        case 'equals':
+                            $query->where('price', '=', (float)$price);
+                            break;
+                        case 'gt':
+                            $query->where('price', '>', (float)$price);
+                            break;
+                        case 'gte':
+                            $query->where('price', '>=', (float)$price);
+                            break;
+                        case 'lt':
+                            $query->where('price', '<', (float)$price);
+                            break;
+                        case 'lte':
+                            $query->where('price', '<=', (float)$price);
+                            break;
+                    }
+                }
+            }
+        }
 
-        /* --- CRUD principal -------------------------------------------- */
-        Route::get('/',                [ProductController::class, 'index'  ])->middleware('permission:product_list'  )->name('index');
-        Route::get('/create',          [ProductController::class, 'create' ])->middleware('permission:product_create')->name('create');
-        Route::post('/',               [ProductController::class, 'store'  ])->middleware('permission:product_create')->name('store');
+        // Filtres numériques pour le stock
+        if ($stockOperator = $request->input('stock_operator')) {
+            if ($stockOperator === 'between') {
+                $minStock = $request->input('stock_min');
+                $maxStock = $request->input('stock_max');
+                if ($minStock !== null && $maxStock !== null) {
+                    $query->whereBetween('stock_quantity', [(int)$minStock, (int)$maxStock]);
+                }
+            } else {
+                $stock = $request->input('stock');
+                if ($stock !== null && $stock !== '') {
+                    switch ($stockOperator) {
+                        case 'equals':
+                            $query->where('stock_quantity', '=', (int)$stock);
+                            break;
+                        case 'gt':
+                            $query->where('stock_quantity', '>', (int)$stock);
+                            break;
+                        case 'gte':
+                            $query->where('stock_quantity', '>=', (int)$stock);
+                            break;
+                        case 'lt':
+                            $query->where('stock_quantity', '<', (int)$stock);
+                            break;
+                        case 'lte':
+                            $query->where('stock_quantity', '<=', (int)$stock);
+                            break;
+                    }
+                }
+            }
+        }
 
-        /* Tout ce qui contient {product} vient après ! */
-        Route::get('/{product}',       [ProductController::class, 'show'   ])->middleware('permission:product_show'  )->name('show');
-        Route::get('/{product}/edit',  [ProductController::class, 'edit'   ])->middleware('permission:product_edit'  )->name('edit');
-        Route::patch('/{product}',     [ProductController::class, 'update' ])->middleware('permission:product_edit'  )->name('update');
-        Route::delete('/{product}',    [ProductController::class, 'destroy'])->middleware('permission:product_delete')->name('destroy');
+        // Filtres de date
+        if ($startDate = $request->input('date_start')) {
+            $query->whereDate('created_at', '>=', $startDate);
+        }
+        if ($endDate = $request->input('date_end')) {
+            $query->whereDate('created_at', '<=', $endDate);
+        }
 
-        Route::post('/{id}/restore',        [ProductController::class, 'restore'    ])->middleware('permission:product_restore')->name('restore');
-        Route::delete('/{id}/force-delete', [ProductController::class, 'forceDelete'])->middleware('permission:product_delete')->name('force-delete');
-    });
+        $query->orderBy($request->input('sort', 'created_at'), $request->input('dir', 'desc'));
+        $per = (int) $request->input('per_page', 10);
+        $products = $per === -1
+            ? $query->paginate($query->count())->appends($request->query())
+            : $query->paginate($per)->appends($request->query());
 
-    /* ------------------------------------------------------------------ */
-    /* Gestion de Stock                                                   */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('stock-movements')->name('stock-movements.')->group(function () {
-        Route::get('/',                [StockMovementController::class, 'index'  ])->middleware('permission:stock_list'  )->name('index');
-        Route::get('/create',          [StockMovementController::class, 'create' ])->middleware('permission:stock_create')->name('create');
-        Route::post('/',               [StockMovementController::class, 'store'  ])->middleware('permission:stock_create')->name('store');
-        Route::get('/report',          [StockMovementController::class, 'report' ])->middleware('permission:stock_list'  )->name('report');
-        Route::get('/export',          [StockMovementController::class, 'export' ])->middleware('permission:stock_list'  )->name('export');
-
-        Route::get('/{stockMovement}',      [StockMovementController::class, 'show'   ])->middleware('permission:stock_list'  )->name('show');
-        Route::get('/{stockMovement}/edit', [StockMovementController::class, 'edit'   ])->middleware('permission:stock_edit'  )->name('edit');
-        Route::patch('/{stockMovement}',    [StockMovementController::class, 'update' ])->middleware('permission:stock_edit'  )->name('update');
-        Route::delete('/{stockMovement}',   [StockMovementController::class, 'destroy'])->middleware('permission:stock_delete')->name('destroy');
-
-        Route::post('/{id}/restore',        [StockMovementController::class, 'restore'])->middleware('permission:stock_edit'  )->name('restore');
-        Route::delete('/{id}/force-delete', [StockMovementController::class, 'forceDelete'])->middleware('permission:stock_delete')->name('force-delete');
-    });
-
-    /* ------------------------------------------------------------------ */
-    /* Fournisseurs                                                       */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('providers')->name('providers.')->group(function () {
-        Route::get('/',                [ProviderController::class, 'index'  ])->middleware('permission:stock_list'  )->name('index');
-        Route::get('/create',          [ProviderController::class, 'create' ])->middleware('permission:stock_create')->name('create');
-        Route::post('/',               [ProviderController::class, 'store'  ])->middleware('permission:stock_create')->name('store');
-        Route::get('/{provider}',      [ProviderController::class, 'show'   ])->middleware('permission:stock_list'  )->name('show');
-        Route::get('/{provider}/edit', [ProviderController::class, 'edit'   ])->middleware('permission:stock_edit'  )->name('edit');
-        Route::patch('/{provider}',    [ProviderController::class, 'update' ])->middleware('permission:stock_edit'  )->name('update');
-        Route::delete('/{provider}',   [ProviderController::class, 'destroy'])->middleware('permission:stock_delete')->name('destroy');
-        Route::post('/{id}/restore',   [ProviderController::class, 'restore'])->middleware('permission:stock_edit'  )->name('restore');
-    });
-
-    /* ------------------------------------------------------------------ */
-    /* Motifs de mouvements de stock                                      */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('stock-movement-reasons')->name('stock-movement-reasons.')->group(function () {
-        Route::get('/',                [StockMovementReasonController::class, 'index'  ])->middleware('permission:stock_list'  )->name('index');
-        Route::get('/create',          [StockMovementReasonController::class, 'create' ])->middleware('permission:stock_create')->name('create');
-        Route::post('/',               [StockMovementReasonController::class, 'store'  ])->middleware('permission:stock_create')->name('store');
-        Route::get('/{stockMovementReason}',      [StockMovementReasonController::class, 'show'   ])->middleware('permission:stock_list'  )->name('show');
-        Route::get('/{stockMovementReason}/edit', [StockMovementReasonController::class, 'edit'   ])->middleware('permission:stock_edit'  )->name('edit');
-        Route::patch('/{stockMovementReason}',    [StockMovementReasonController::class, 'update' ])->middleware('permission:stock_edit'  )->name('update');
-        Route::delete('/{stockMovementReason}',   [StockMovementReasonController::class, 'destroy'])->middleware('permission:stock_delete')->name('destroy');
-        Route::post('/{id}/restore',             [StockMovementReasonController::class, 'restore'])->middleware('permission:stock_edit'  )->name('restore');
-    });
-
-    /* ------------------------------------------------------------------ */
-    /* Taxes                                                              */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('tax-rates')->name('taxrates.')->group(function () {
-        Route::get('/',                [TaxRateController::class, 'index'  ])->middleware('permission:taxrate_list'  )->name('index');
-        Route::get('/create',          [TaxRateController::class, 'create' ])->middleware('permission:taxrate_create')->name('create');
-        Route::get('/{taxRate}',       [TaxRateController::class, 'show'   ])->middleware('permission:taxrate_show'  )->name('show');
-        Route::post('/',               [TaxRateController::class, 'store'  ])->middleware('permission:taxrate_create')->name('store');
-        Route::get('/{taxRate}/edit',  [TaxRateController::class, 'edit'   ])->middleware('permission:taxrate_edit'  )->name('edit');
-        Route::put('/{taxRate}',       [TaxRateController::class, 'update' ])->middleware('permission:taxrate_edit'  )->name('update');
-        Route::delete('/{taxRate}',    [TaxRateController::class, 'destroy'])->middleware('permission:taxrate_delete')->name('destroy');
-        Route::post('/{id}/restore',   [TaxRateController::class, 'restore'])->middleware('permission:taxrate_restore')->name('restore');
-    });
-
-    /* ------------------------------------------------------------------ */
-    /* Devises                                                            */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('currencies')->name('currencies.')->group(function () {
-        Route::get('/',                [CurrencyController::class, 'index'  ])->middleware('permission:currency_list'  )->name('index');
-        Route::get('/create',          [CurrencyController::class, 'create' ])->middleware('permission:currency_create')->name('create');
-        Route::post('/',               [CurrencyController::class, 'store'  ])->middleware('permission:currency_create')->name('store');
-        Route::get('/{currency}',      [CurrencyController::class, 'show'   ])->middleware('permission:currency_show'  )->name('show');
-        Route::get('/{currency}/edit', [CurrencyController::class, 'edit'   ])->middleware('permission:currency_edit'  )->name('edit');
-        Route::put('/{currency}',      [CurrencyController::class, 'update' ])->middleware('permission:currency_edit'  )->name('update');
-        Route::delete('/{currency}',   [CurrencyController::class, 'destroy'])->middleware('permission:currency_delete')->name('destroy');
-        Route::post('/{id}/restore',   [CurrencyController::class, 'restore'])->middleware('permission:currency_restore')->name('restore');
-    });
-
-    /* ------------------------------------------------------------------ */
-    /* Utilisateurs                                                       */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('users')->name('users.')->group(function () {
-        Route::get('/',                [UserController::class, 'index'  ])->name('index');
-        Route::get('/export',          [UserController::class, 'export' ])->name('export');
-        Route::get('/create',          [UserController::class, 'create' ])->name('create');
-        Route::post('/',               [UserController::class, 'store'  ])->name('store');
-        Route::get('/{id}',            [UserController::class, 'show'   ])->name('show');
-        Route::get('/{user}/edit',     [UserController::class, 'edit'   ])->name('edit');
-        Route::patch('/{user}',        [UserController::class, 'update' ])->name('update');
-        Route::post('/{id}/restore',   [UserController::class, 'restore'])->name('restore');
-        Route::delete('/{id}',         [UserController::class, 'destroy'])->name('destroy');
-        Route::delete('/{id}/force-delete', [UserController::class, 'forceDelete'])->name('force-delete');
-    });
-
-    /* ------------------------------------------------------------------ */
-    /* Rôles                                                              */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('roles')->name('roles.')->group(function () {
-        Route::get('/',                [RoleController::class, 'index'  ])->name('index');
-        Route::get('/create',          [RoleController::class, 'create' ])->name('create');
-        Route::post('/',               [RoleController::class, 'store'  ])->name('store');
-        Route::get('/{id}',            [RoleController::class, 'show'   ])->name('show');
-        Route::get('/{role}/edit',     [RoleController::class, 'edit'   ])->name('edit');
-        Route::patch('/{role}',        [RoleController::class, 'update' ])->name('update');
-        Route::delete('/{id}',         [RoleController::class, 'destroy'])->name('destroy');
-        Route::post('/{id}/restore',   [RoleController::class, 'restore'])->name('restore');
-    });
-
-    /* ------------------------------------------------------------------ */
-    /* Permissions                                                        */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('permissions')->name('permissions.')->group(function () {
-        Route::get('/',                [PermissionController::class, 'index' ])->name('index');
-        Route::get('/create',          [PermissionController::class, 'create'])->name('create');
-        Route::post('/',               [PermissionController::class, 'store' ])->name('store');
-        Route::get('/{permission}',       [PermissionController::class, 'show' ])->name('show');
-        Route::get('/{permission}/edit', [PermissionController::class, 'edit' ])->name('edit');
-        Route::patch('/{permission}',  [PermissionController::class, 'update'])->name('update');
-        Route::delete('/{id}',         [PermissionController::class, 'destroy'])->name('destroy');
-        Route::post('/{id}/restore',   [PermissionController::class, 'restore'])->name('restore');
-    });
-
-    /* ------------------------------------------------------------------ */
-    /* Factures                                                           */
-    /* ------------------------------------------------------------------ */
-    Route::prefix('invoices')->name('invoices.')->group(function () {
-        Route::get('/', [InvoiceController::class, 'index'])->name('index');
-        Route::get('/{invoice}', [InvoiceController::class, 'show'])->name('show');
-        Route::get('/{invoice}/export-pdf', [InvoiceController::class, 'exportPdf'])->name('export-pdf');
-        Route::get('/{invoice}/edit', [InvoiceController::class, 'edit'])->name('edit');
-        Route::patch('/{invoice}', [InvoiceController::class, 'update'])->name('update');
-        Route::post('/{invoice}/duplicate', [InvoiceController::class, 'duplicate'])->name('duplicate');
-        Route::post('/{invoice}/send', [InvoiceController::class, 'send'])->name('send');
-        Route::post('/{invoice}/mark-paid', [InvoiceController::class, 'markAsPaid'])->name('mark-paid');
-        Route::post('/{invoice}/send-reminder', [InvoiceController::class, 'sendReminder'])->name('send-reminder');
-        Route::post('/{invoice}/change-status', [InvoiceController::class, 'changeStatus'])->name('change-status');
-    });
-
-    /* ------------------------------------------------------------------ */
-    /* Logs d'audit & de connexion                                        */
-    /* ------------------------------------------------------------------ */
-    Route::get('/audit-logs', function () {
-        $logs = Activity::with('causer')->latest()->get();
-
-        return Inertia::render('audit-logs/Index', [
-            'logs' => [
-                'data'         => $logs,
-                'current_page' => 1,
-                'per_page'     => 10,
-                'total'        => $logs->count(),
-            ],
+        return Inertia::render('Products/Index', [
+            'products' => $products,
+            'filters'  => $request->only([
+                'search', 'name', 'category', 'status',
+                'price', 'price_operator', 'price_min', 'price_max',
+                'stock', 'stock_operator', 'stock_min', 'stock_max',
+                'date_start', 'date_end'
+            ]),
+            'sort'     => $request->input('sort', 'created_at'),
+            'dir'      => $request->input('dir', 'desc'),
+            'flash'    => session()->only(['success', 'error']),
         ]);
-    })->name('audit-logs.index');
+    }
 
-    Route::get('/audit-logs/export', [AuditLogExportController::class, 'export'])->name('audit-logs.export');
-    Route::get('/login-logs',        [LoginLogController::class, 'index' ])->name('login-logs.index');
-    Route::get('/login-logs/export', [LoginLogExportController::class, 'export'])->name('login-logs.export');
+    /**
+     * Ajoute les conditions de recherche pour les dates dans différents formats
+     */
+    private function addDateSearchConditions($query, string $term): void
+    {
+        // Formats de date supportés
+        $dateFormats = [
+            '/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/' => 'd/m/Y',     // 16/06/2025
+            '/^(\d{1,2})-(\d{1,2})-(\d{4})$/' => 'd-m-Y',       // 16-06-2025
+            '/^(\d{4})-(\d{1,2})-(\d{1,2})$/' => 'Y-m-d',       // 2025-06-16
+            '/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/' => 'd.m.Y',     // 16.06.2025
+        ];
 
-    // Ex. paramétrage application
-    // Route::prefix('settings')->name('settings.')->group(function () {
-    //     Route::get('/app', [AppSettingController::class, 'edit'])->name('app.edit');
-    //     Route::post('/app', [AppSettingController::class, 'update'])->name('app.update');
-    // });
-});
+        foreach ($dateFormats as $pattern => $format) {
+            if (preg_match($pattern, $term)) {
+                try {
+                    // Essayer de parser la date avec Carbon
+                    $date = Carbon::createFromFormat($format, $term);
+                    if ($date) {
+                        $formattedDate = $date->format('Y-m-d');
 
-/* ---------------------------------------------------------------------- */
-/* Autres fichiers de routes                                              */
-/* ---------------------------------------------------------------------- */
-require __DIR__ . '/settings.php';
-require __DIR__ . '/auth.php';
+                        // Recherche exacte par date
+                        $query->orWhereDate('created_at', '=', $formattedDate)
+                              ->orWhereDate('updated_at', '=', $formattedDate);
+
+                        // Recherche par composants de date
+                        $query->orWhere(function($subQuery) use ($date) {
+                            $subQuery->whereYear('created_at', $date->year)
+                                    ->whereMonth('created_at', $date->month)
+                                    ->whereDay('created_at', $date->day);
+                        });
+
+                        break; // Sortir de la boucle une fois qu'un format correspond
+                    }
+                } catch (\Exception $e) {
+                    // Si la conversion échoue, continuer avec le format suivant
+                    continue;
+                }
+            }
+        }
+
+        // Recherche partielle pour les années (ex: "2025" trouve toutes les dates de 2025)
+        if (preg_match('/^\d{4}$/', $term)) {
+            $year = (int) $term;
+            $query->orWhereYear('created_at', '=', $year)
+                  ->orWhereYear('updated_at', '=', $year);
+        }
+
+        // Recherche partielle pour les mois/années (ex: "06/2025" ou "06-2025")
+        if (preg_match('/^(\d{1,2})[\/\-](\d{4})$/', $term, $matches)) {
+            $month = (int) $matches[1];
+            $year = (int) $matches[2];
+
+            $query->orWhere(function($subQuery) use ($month, $year) {
+                $subQuery->whereYear('created_at', $year)
+                        ->whereMonth('created_at', $month);
+            });
+        }
+
+        // Recherche pour les jours/mois (ex: "16/06")
+        if (preg_match('/^(\d{1,2})[\/\-](\d{1,2})$/', $term, $matches)) {
+            $day = (int) $matches[1];
+            $month = (int) $matches[2];
+
+            // Vérifier que c'est bien jour/mois et non mois/jour
+            if ($day <= 31 && $month <= 12) {
+                $query->orWhere(function($subQuery) use ($day, $month) {
+                    $subQuery->whereMonth('created_at', $month)
+                            ->whereDay('created_at', $day);
+                });
+            }
+        }
+    }
+
+    public function create(): Response
+    {
+        return Inertia::render('Products/Create', [
+            'brands'     => Brand::orderBy('name')->get(['id', 'name']),
+            'categories' => Category::orderBy('name')->get(['id', 'name', 'slug']),
+            'currencies' => Currency::all(['code', 'symbol']),
+            'taxRates'   => TaxRate::all(['id', 'name', 'rate']),
+        ]);
+    }
+
+    public function store(ProductRequest $request): RedirectResponse
+    {
+        $validated = $request->validated();
+        $category  = Category::findOrFail($validated['category_id']);
+        $slug      = $category->slug;
+        $config    = config('catalog.specializations');
+
+        $product = Product::create([...$validated, 'id' => (string) Str::uuid()]);
+
+        if (isset($config[$slug]) && isset($validated['spec'])) {
+            $modelClass = $config[$slug]['model'] ?? null;
+            $fields     = $config[$slug]['fields'] ?? [];
+
+            $specData = array_merge($fields, $validated['spec'], ['product_id' => $product->id]);
+            $relation = Str::camel(Str::singular($slug));
+
+            if (method_exists($product, $relation) && method_exists($product->{$relation}(), 'create')) {
+                $product->{$relation}()->create($specData);
+            } elseif ($modelClass && class_exists($modelClass)) {
+                $modelClass::create($specData);
+            }
+        }
+
+        foreach ($request->input('compatibilities', []) as $entry) {
+            $product->compatibleWith()->attach(
+                $entry['compatible_with_id'],
+                [
+                    'direction' => $entry['direction'] ?? 'bidirectional',
+                    'note'      => $entry['note'] ?? null,
+                ]
+            );
+        }
+
+        $this->syncImages($request, $product);
+
+        return to_route('products.index')->with('success', 'Produit créé.');
+    }
+
+    public function show(Product $product): Response
+    {
+        $product->load([
+            'brand','category','currency','taxRate','images',
+            'ram','processor','hardDrive','powerSupply','motherboard','networkCard',
+            'graphicCard','license','software','accessory','laptop','desktop','server',
+            'compatibleWith.category','isCompatibleWith.category',
+        ]);
+
+        $all = collect();
+
+        foreach ($product->compatibleWith as $p) {
+            $all->push((object)[
+                'id' => $p->id,
+                'name' => $p->name,
+                'category' => $p->category?->name,
+                'direction' => $p->pivot->direction,
+                'note' => $p->pivot->note,
+            ]);
+        }
+        foreach ($product->isCompatibleWith as $p) {
+            $all->push((object)[
+                'id' => $p->id,
+                'name' => $p->name,
+                'category' => $p->category?->name,
+                'direction' => $p->pivot->direction,
+                'note' => $p->pivot->note,
+            ]);
+        }
+
+        $allCompatibilities = $all->unique('id')->values();
+        $base = $product->toArray();
+        $config = config('catalog.specializations');
+
+        foreach ($config as $slug => $_) {
+            $relation = Str::camel(Str::singular($slug));
+            if ($product->relationLoaded($relation)) {
+                $base[$relation] = $product->getRelation($relation);
+            }
+        }
+
+        return Inertia::render('Products/Show', [
+            'product' => $base,
+            'allCompatibilities' => $allCompatibilities,
+        ]);
+    }
+
+    public function edit(Product $product): Response
+    {
+        $slug = $product->category?->slug;
+        $relations = ['brand', 'category', 'currency', 'taxRate', 'images'];
+
+        if ($slug) {
+            $relations[] = Str::camel(Str::singular($slug));
+        }
+
+        $product->load(array_merge($relations, ['compatibleWith', 'isCompatibleWith']));
+
+        $compatibilities = $product->compatibleWith
+            ->merge($product->isCompatibleWith)
+            ->values()
+            ->map(fn ($p) => [
+                'compatible_with_id' => $p->id,
+                'name' => $p->name,
+                'direction' => $p->pivot->direction,
+                'note' => $p->pivot->note,
+            ]);
+
+        return Inertia::render('Products/Edit', [
+            'brands' => Brand::orderBy('name')->get(['id', 'name']),
+            'product' => $product,
+            'categories' => Category::orderBy('name')->get(['id', 'name', 'slug']),
+            'currencies' => Currency::all(['code', 'symbol']),
+            'taxRates' => TaxRate::all(['id', 'name', 'rate']),
+            'compatibilities' => $compatibilities,
+        ]);
+    }
+
+    public function update(ProductRequest $request, Product $product): RedirectResponse
+    {
+        DB::transaction(function () use ($request, $product) {
+            $validated = $request->validated();
+            $product->update($validated);
+
+            $category = Category::findOrFail($validated['category_id']);
+            $slug = $category->slug;
+            $config = config('catalog.specializations');
+
+            if (isset($config[$slug]) && isset($validated['spec'])) {
+                $relation = Str::camel(Str::singular($slug));
+
+                if (method_exists($product, $relation)) {
+                    $product->{$relation}()->updateOrCreate(
+                        ['product_id' => $product->id],
+                        $validated['spec']
+                    );
+                }
+            }
+
+            $sent = collect($request->input('compatibilities', []))
+                ->filter(fn ($e) => !empty($e['compatible_with_id']))
+                ->map(fn ($e) => [
+                    'id' => (string) $e['compatible_with_id'],
+                    'direction' => $e['direction'] ?? 'bidirectional',
+                    'note' => $e['note'] ?? null,
+                ]);
+
+            $toSync = $sent->mapWithKeys(fn ($e) => [
+                $e['id'] => ['direction' => $e['direction'], 'note' => $e['note']],
+            ]);
+
+            $existing = ProductCompatibility::withTrashed()
+                ->where(fn ($q) => $q
+                    ->where('product_id', $product->id)
+                    ->orWhere('compatible_with_id', $product->id))
+                ->get();
+
+            foreach ($existing as $pivot) {
+                $otherId = $pivot->product_id === $product->id
+                    ? $pivot->compatible_with_id
+                    : $pivot->product_id;
+
+                if ($toSync->has($otherId)) {
+                    $attrs = $toSync[$otherId];
+                    if ($pivot->trashed()) $pivot->restore();
+                    $pivot->update($attrs);
+                    $toSync->forget($otherId);
+                } elseif (is_null($pivot->deleted_at)) {
+                    $pivot->delete();
+                }
+            }
+
+            foreach ($toSync as $otherId => $attrs) {
+                $product->compatibleWith()->attach($otherId, $attrs);
+            }
+
+            $this->syncImages($request, $product);
+        });
+
+        return to_route('products.show', $product)->with('success', 'Produit mis à jour.');
+    }
+
+    public function destroy(Product $product): RedirectResponse
+    {
+        $product->delete();
+        return back()->with('success', 'Produit supprimé.');
+    }
+
+    public function restore(Product $product): RedirectResponse
+    {
+        $product->restore();
+        return back()->with('success', 'Produit restauré.');
+    }
+
+    protected function syncImages(ProductRequest $request, Product $product): void
+    {
+        if ($ids = $request->input('deleted_image_ids', [])) {
+            ProductImage::whereIn('id', $ids)->delete();
+        }
+        if ($ids = $request->input('restored_image_ids', [])) {
+            ProductImage::withTrashed()->whereIn('id', $ids)->restore();
+        }
+
+        ProductImage::where('product_id', $product->id)
+            ->whereNull('deleted_at')
+            ->update(['is_primary' => false]);
+
+        $primaryIdx = (int) $request->input('primary_image_index', 0);
+        $globalIdx = 0;
+        $primaryPath = null;
+
+        if ($request->hasFile('images')) {
+            foreach ($request->file('images') as $file) {
+                $path = $file->store("products/{$product->id}", 'public');
+                $isPrimary = $globalIdx === $primaryIdx;
+
+                $product->images()->create([
+                    'path' => $path,
+                    'is_primary' => $isPrimary,
+                ]);
+
+                if ($isPrimary) $primaryPath = $path;
+                $globalIdx++;
+            }
+        }
+
+        $existing = $product->images()
+            ->whereNull('deleted_at')
+            ->orderBy('id')
+            ->get();
+
+        foreach ($existing as $img) {
+            $isPrimary = $globalIdx === $primaryIdx;
+            if ($isPrimary) {
+                $img->update(['is_primary' => true]);
+                $primaryPath = $img->path;
+            }
+            $globalIdx++;
+        }
+
+        if (!$primaryPath && $first = $existing->first()) {
+            $first->update(['is_primary' => true]);
+            $primaryPath = $first->path;
+        }
+
+        if ($primaryPath) {
+            $product->updateQuietly(['image_main' => $primaryPath]);
+        }
+    }
+
+    public function compatibleList()
+    {
+        $machineSlugs = ['desktop', 'desktops', 'laptop', 'laptops', 'server', 'servers'];
+
+        return Product::query()
+            ->select('products.id', 'products.name')
+            ->join('categories', 'categories.id', '=', 'products.category_id')
+            ->whereIn('categories.slug', $machineSlugs)
+            ->whereNull('products.deleted_at')
+            ->orderBy('products.name')
+            ->get();
+    }
+}
