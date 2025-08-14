@@ -1,218 +1,562 @@
 <?php
 
-namespace App\Models;
+namespace App\Http\Controllers;
 
-use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\{
-    HasOne, HasMany, BelongsToMany, BelongsTo
+use App\Models\{
+    Product,
+    Brand,
+    Category,
+    Currency,
+    TaxRate,
+    ProductImage,
+    ProductCompatibility
 };
-use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\SoftDeletes;
-use Spatie\Activitylog\Traits\LogsActivity;
-use Spatie\Activitylog\LogOptions;
-use Spatie\Activitylog\Models\Activity;
-use App\Traits\BelongsToTenant;
+use App\Http\Requests\ProductRequest;
+use Illuminate\Http\Request;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\DB;
+use Inertia\Inertia;
+use Inertia\Response;
+use Carbon\Carbon;
 
-class Product extends Model
+class ProductController extends Controller
 {
-    use HasFactory, SoftDeletes, LogsActivity, BelongsToTenant;
-
-    protected $fillable = [
-        'id', 'tenant_id', 'brand_id', 'name', 'model', 'sku', 'slug',
-        'description', 'meta_title', 'meta_description', 'type',
-        'price', 'compare_at_price', 'cost_price', 'stock_quantity',
-        'weight', 'length', 'width', 'height', 'track_inventory',
-        'low_stock_threshold', 'allow_backorder', 'currency_code',
-        'tax_rate_id', 'category_id', 'image_main', 'is_active',
-        'is_featured', 'visibility', 'available_from', 'available_until',
-        'download_url', 'download_limit', 'download_expiry_days',
-    ];
-
-    public $incrementing = false;   // UUIDv7
-    protected $keyType    = 'string';
-
-    protected $casts = [
-        'price' => 'decimal:2',
-        'compare_at_price' => 'decimal:2',
-        'cost_price' => 'decimal:2',
-        'weight' => 'decimal:2',
-        'length' => 'decimal:2',
-        'width' => 'decimal:2',
-        'height' => 'decimal:2',
-        'is_active' => 'boolean',
-        'is_featured' => 'boolean',
-        'track_inventory' => 'boolean',
-        'allow_backorder' => 'boolean',
-        'available_from' => 'datetime',
-        'available_until' => 'datetime',
-    ];
-    /* ------------------------------------------------------------------ */
-    /* Relations génériques                                               */
-    /* ------------------------------------------------------------------ */
-    public function category()         { return $this->belongsTo(Category::class); }
-    public function categories(): BelongsToMany { 
-        return $this->belongsToMany(Category::class, 'product_categories')
-                    ->withPivot('is_primary')
-                    ->withTimestamps(); 
-    }
-    public function taxRate()          { return $this->belongsTo(TaxRate::class); }
-    public function currency()         { return $this->belongsTo(Currency::class, 'currency_code', 'code'); }
-    public function brand()            { return $this->belongsTo(Brand::class); }
-    public function images(): HasMany  { return $this->hasMany(ProductImage::class); }
-    public function prices(): HasMany  { return $this->hasMany(PriceHistory::class); }
-    public function compatibilities(): HasMany { return $this->hasMany(ProductCompatibility::class); }
-    public function variants(): HasMany { return $this->hasMany(ProductVariant::class); }
-
-    /* ------------------------------------------------------------------ */
-    /* Compatibilités via pivot (soft-delete inclus)                       */
-    /* ------------------------------------------------------------------ */
-    public function compatibleWith(): BelongsToMany
+    public function index(Request $request): Response
     {
-        return $this->belongsToMany(
-            Product::class,
-            'product_compatibilities',
-            'product_id',
-            'compatible_with_id'
-        )
-        ->withPivot(['direction', 'note', 'deleted_at'])
-        ->withTimestamps()
-        ->wherePivotNull('deleted_at');
-    }
+        $query = Product::query()
+            ->with(['brand:id,name', 'category:id,name', 'currency:code,symbol', 'variants']);
 
-    public function isCompatibleWith(): BelongsToMany
-    {
-        return $this->belongsToMany(
-            Product::class,
-            'product_compatibilities',
-            'compatible_with_id',
-            'product_id'
-        )
-        ->withPivot(['direction', 'note', 'deleted_at'])
-        ->withTimestamps()
-        ->wherePivotNull('deleted_at');
-    }
+        // Recherche globale améliorée
+        if ($search = trim($request->input('search'))) {
+            foreach (preg_split('/\s+/', $search, -1, PREG_SPLIT_NO_EMPTY) as $term) {
+                $like = "%{$term}%";
+                $query->where(function ($q) use ($term, $like) {
+                    // Recherche dans les champs textuels
+                    $q->where('name', 'like', $like)
+                      ->orWhere('description', 'like', $like)
+                      ->orWhere('slug', 'like', $like)
+                      ->orWhere('meta_title', 'like', $like)
+                      ->orWhereHas('category', fn($subQ) => $subQ->where('name', 'like', $like))
+                      ->orWhereHas('brand', fn($subQ) => $subQ->where('name', 'like', $like));
 
-    /* ------------------------------------------------------------------ */
-    /* Relations spécialisées (camelCase “officiel”)                      */
-    /* ------------------------------------------------------------------ */
-    public function ram():           HasOne { return $this->hasOne(Ram::class); }
-    public function processor():     HasOne { return $this->hasOne(Processor::class); }
-    public function hardDrive():     HasOne { return $this->hasOne(HardDrive::class); }
-    public function powerSupply():   HasOne { return $this->hasOne(PowerSupply::class); }
-    public function motherboard():   HasOne { return $this->hasOne(Motherboard::class); }
-    public function networkCard():   HasOne { return $this->hasOne(NetworkCard::class); }
-    public function graphicCard():   HasOne { return $this->hasOne(GraphicCard::class); }
-    public function license():       HasOne { return $this->hasOne(License::class); }
-    public function software():      HasOne { return $this->hasOne(Software::class); }
-    public function accessory():     HasOne { return $this->hasOne(Accessory::class); }
-    public function laptop():        HasOne { return $this->hasOne(Laptop::class); }
-    public function desktop():       HasOne { return $this->hasOne(Desktop::class); }
-    public function server():        HasOne { return $this->hasOne(Server::class); }
+                    // Si c'est un nombre, rechercher aussi dans les champs numériques
+                    if (is_numeric($term)) {
+                        $numericValue = (float) $term;
+                        $intValue = (int) $term;
 
-    /* ------------------------------------------------------------------ */
-    /* Alias slug-friendly (pour config.catalog)                           */
-    /* ------------------------------------------------------------------ */
-    public function rams()           { return $this->ram(); }
-    public function processors()     { return $this->processor(); }
-    public function hard_drives()    { return $this->hardDrive(); }
-    public function power_supplies() { return $this->powerSupply(); }
-    public function motherboards()   { return $this->motherboard(); }
-    public function network_cards()  { return $this->networkCard(); }
-    public function graphic_cards()  { return $this->graphicCard(); }
-    public function licenses()       { return $this->license(); }
-    public function softwares()      { return $this->software(); }
-    public function accessories()    { return $this->accessory(); }
-    public function laptops()        { return $this->laptop(); }
-    public function desktops()       { return $this->desktop(); }
-    public function servers()        { return $this->server(); }
+                        $q->orWhere('price', '=', $numericValue)
+                          ->orWhere('compare_at_price', '=', $numericValue)
+                          ->orWhere('stock_quantity', '=', $intValue)
+                          // Recherche partielle dans le prix (ex: "299" trouve "299.99")
+                          ->orWhere('price', 'like', $like)
+                          // Recherche par année dans created_at
+                          ->orWhereYear('created_at', '=', $intValue);
+                    }
 
-    /* ------------------------------------------------------------------ */
-    /* Méthodes e-commerce                                                */
-    /* ------------------------------------------------------------------ */
-    public function isInStock(): bool
-    {
-        if (!$this->track_inventory) return true;
-        return $this->stock_quantity > 0 || $this->allow_backorder;
-    }
-
-    public function isLowStock(): bool
-    {
-        return $this->track_inventory && 
-               $this->stock_quantity <= $this->low_stock_threshold;
-    }
-
-    public function isAvailable(): bool
-    {
-        if (!$this->is_active || $this->visibility === 'hidden') return false;
-        
-        $now = now();
-        if ($this->available_from && $now->isBefore($this->available_from)) return false;
-        if ($this->available_until && $now->isAfter($this->available_until)) return false;
-        
-        return true;
-    }
-
-    public function hasDiscount(): bool
-    {
-        return $this->compare_at_price && $this->compare_at_price > $this->price;
-    }
-
-    public function getDiscountPercentage(): ?float
-    {
-        if (!$this->hasDiscount()) return null;
-        
-        return round((($this->compare_at_price - $this->price) / $this->compare_at_price) * 100, 1);
-    }
-
-    public function getFormattedPrice(): string
-    {
-        return number_format($this->price, 2) . ' ' . $this->currency_code;
-    }
-
-    public function getPrimaryCategory(): ?Category
-    {
-        return $this->categories()->wherePivot('is_primary', true)->first() ?? $this->category;
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* Boot events                                                        */
-    /* ------------------------------------------------------------------ */
-    protected static function boot(): void
-    {
-        parent::boot();
-        
-        static::creating(function (Product $product) {
-            if (empty($product->slug)) {
-                $product->slug = Str::slug($product->name);
+                    // Détection et traitement des formats de date
+                    $this->addDateSearchConditions($q, $term);
+                });
             }
-        });
-        
-        static::updating(function (Product $product) {
-            if ($product->isDirty('name') && empty($product->slug)) {
-                $product->slug = Str::slug($product->name);
-            }
-        });
-    }
-    /* ------------------------------------------------------------------ */
-    /* Logs d’activité (Spatie)                                           */
-    /* ------------------------------------------------------------------ */
-    public function getActivitylogOptions(): LogOptions
-    {
-        return LogOptions::defaults()
-            ->useLogName('product')
-            ->logAll()
-            ->logOnlyDirty()
-            ->logExcept(['image_main'])
-            ->dontSubmitEmptyLogs()
-            ->setDescriptionForEvent(fn(string $e) => "Product has been {$e}");
-    }
+        }
 
-    public function tapActivity(Activity $activity, string $event): void
-    {
-        $activity->properties = $activity->properties->merge([
-            'brand_name'    => $this->brand?->name,
-            'category_name' => $this->category?->name,
+        // Filtres e-commerce spécifiques
+        if ($type = $request->input('type')) {
+            $query->where('type', $type);
+        }
+
+        if ($visibility = $request->input('visibility')) {
+            $query->where('visibility', $visibility);
+        }
+
+        if ($request->input('is_featured') === 'true') {
+            $query->where('is_featured', true);
+        }
+
+        if ($request->input('low_stock') === 'true') {
+            $query->where('track_inventory', true)
+        // Filtres spécifiques
+        if ($name = $request->input('name')) {
+            $query->where('name', 'like', "%{$name}%");
+        }
+
+        if ($cat = $request->input('category')) {
+            $query->whereHas('category', fn ($q) => $q->where('name', 'like', "%{$cat}%"));
+        }
+
+        if ($status = $request->input('status')) {
+            $status === 'actif'
+                ? $query->whereNull('deleted_at')
+                : $query->whereNotNull('deleted_at');
+        }
+
+        // Filtres numériques pour le prix
+        if ($priceOperator = $request->input('price_operator')) {
+            if ($priceOperator === 'between') {
+                $minPrice = $request->input('price_min');
+                $maxPrice = $request->input('price_max');
+                if ($minPrice !== null && $maxPrice !== null) {
+                    $query->whereBetween('price', [(float)$minPrice, (float)$maxPrice]);
+                }
+            } else {
+                $price = $request->input('price');
+                if ($price !== null && $price !== '') {
+                    switch ($priceOperator) {
+                        case 'equals':
+                            $query->where('price', '=', (float)$price);
+                            break;
+                        case 'gt':
+                            $query->where('price', '>', (float)$price);
+                            break;
+                        case 'gte':
+                            $query->where('price', '>=', (float)$price);
+                            break;
+                        case 'lt':
+                            $query->where('price', '<', (float)$price);
+                            break;
+                        case 'lte':
+                            $query->where('price', '<=', (float)$price);
+                            break;
+                    }
+                }
+            }
+        }
+
+        // Filtres numériques pour le stock
+        if ($stockOperator = $request->input('stock_operator')) {
+            if ($stockOperator === 'between') {
+                $minStock = $request->input('stock_min');
+                $maxStock = $request->input('stock_max');
+                if ($minStock !== null && $maxStock !== null) {
+                    $query->whereBetween('stock_quantity', [(int)$minStock, (int)$maxStock]);
+                }
+            } else {
+                $stock = $request->input('stock');
+                if ($stock !== null && $stock !== '') {
+                    switch ($stockOperator) {
+                        case 'equals':
+                            $query->where('stock_quantity', '=', (int)$stock);
+                            break;
+                        case 'gt':
+                            $query->where('stock_quantity', '>', (int)$stock);
+                            break;
+                        case 'gte':
+                            $query->where('stock_quantity', '>=', (int)$stock);
+                            break;
+                        case 'lt':
+                            $query->where('stock_quantity', '<', (int)$stock);
+                            break;
+                        case 'lte':
+                            $query->where('stock_quantity', '<=', (int)$stock);
+                            break;
+                    }
+                }
+            }
+        }
+
+        // Filtres de date
+        if ($startDate = $request->input('date_start')) {
+            $query->whereDate('created_at', '>=', $startDate);
+        }
+        if ($endDate = $request->input('date_end')) {
+            $query->whereDate('created_at', '<=', $endDate);
+        }
+
+        $query->orderBy($request->input('sort', 'created_at'), $request->input('dir', 'desc'));
+        $per = (int) $request->input('per_page', 10);
+        $products = $per === -1
+            ? $query->paginate($query->count())->appends($request->query())
+            : $query->paginate($per)->appends($request->query());
+
+        return Inertia::render('Products/Index', [
+            'products' => $products,
+            'filters'  => $request->only([
+                'search', 'name', 'category', 'status',
+                'price', 'price_operator', 'price_min', 'price_max',
+                'stock', 'stock_operator', 'stock_min', 'stock_max',
+                'date_start', 'date_end'
+            ]),
+            'sort'     => $request->input('sort', 'created_at'),
+            'dir'      => $request->input('dir', 'desc'),
+            'flash'    => session()->only(['success', 'error']),
         ]);
     }
+
+    /**
+     * Ajoute les conditions de recherche pour les dates dans différents formats
+     */
+    private function addDateSearchConditions($query, string $term): void
+    {
+        // Formats de date supportés
+        $dateFormats = [
+            '/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/' => 'd/m/Y',     // 16/06/2025
+            '/^(\d{1,2})-(\d{1,2})-(\d{4})$/' => 'd-m-Y',       // 16-06-2025
+            '/^(\d{4})-(\d{1,2})-(\d{1,2})$/' => 'Y-m-d',       // 2025-06-16
+            '/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/' => 'd.m.Y',     // 16.06.2025
+        ];
+
+        foreach ($dateFormats as $pattern => $format) {
+            if (preg_match($pattern, $term)) {
+                try {
+                    // Essayer de parser la date avec Carbon
+                    $date = Carbon::createFromFormat($format, $term);
+                    if ($date) {
+                        $formattedDate = $date->format('Y-m-d');
+
+                        // Recherche exacte par date
+                        $query->orWhereDate('created_at', '=', $formattedDate)
+                              ->orWhereDate('updated_at', '=', $formattedDate);
+
+                        // Recherche par composants de date
+                        $query->orWhere(function($subQuery) use ($date) {
+                            $subQuery->whereYear('created_at', $date->year)
+                                    ->whereMonth('created_at', $date->month)
+                                    ->whereDay('created_at', $date->day);
+                        });
+
+                        break; // Sortir de la boucle une fois qu'un format correspond
+                    }
+                } catch (\Exception $e) {
+                    // Si la conversion échoue, continuer avec le format suivant
+                    continue;
+                }
+            }
+        }
+
+        // Recherche partielle pour les années (ex: "2025" trouve toutes les dates de 2025)
+        if (preg_match('/^\d{4}$/', $term)) {
+            $year = (int) $term;
+            $query->orWhereYear('created_at', '=', $year)
+                  ->orWhereYear('updated_at', '=', $year);
+        }
+
+        // Recherche partielle pour les mois/années (ex: "06/2025" ou "06-2025")
+        if (preg_match('/^(\d{1,2})[\/\-](\d{4})$/', $term, $matches)) {
+            $month = (int) $matches[1];
+            $year = (int) $matches[2];
+
+            $query->orWhere(function($subQuery) use ($month, $year) {
+                $subQuery->whereYear('created_at', $year)
+                        ->whereMonth('created_at', $month);
+            });
+        }
+
+        // Recherche pour les jours/mois (ex: "16/06")
+        if (preg_match('/^(\d{1,2})[\/\-](\d{1,2})$/', $term, $matches)) {
+            $day = (int) $matches[1];
+            $month = (int) $matches[2];
+
+            // Vérifier que c'est bien jour/mois et non mois/jour
+            if ($day <= 31 && $month <= 12) {
+                $query->orWhere(function($subQuery) use ($day, $month) {
+                    $subQuery->whereMonth('created_at', $month)
+                            ->whereDay('created_at', $day);
+                });
+            }
+        }
+    }
+
+    public function create(): Response
+    {
+        return Inertia::render('Products/Create', [
+            'brands'     => Brand::orderBy('name')->get(['id', 'name']),
+            'categories' => Category::orderBy('name')->get(['id', 'name', 'slug']),
+            'currencies' => Currency::all(['code', 'symbol']),
+            'taxRates'   => TaxRate::all(['id', 'name', 'rate']),
+        ]);
+    }
+
+    public function store(ProductRequest $request): RedirectResponse
+    {
+        $validated = $request->validated();
+        $category  = Category::findOrFail($validated['category_id']);
+        $slug      = $category->slug;
+        $config    = config('catalog.specializations');
+
+        $product = Product::create([...$validated, 'id' => (string) Str::uuid()]);
+
+        if (isset($config[$slug]) && isset($validated['spec'])) {
+            $modelClass = $config[$slug]['model'] ?? null;
+            $fields     = $config[$slug]['fields'] ?? [];
+
+            $specData = array_merge($fields, $validated['spec'], ['product_id' => $product->id]);
+            $relation = Str::camel(Str::singular($slug));
+
+            if (method_exists($product, $relation) && method_exists($product->{$relation}(), 'create')) {
+                $product->{$relation}()->create($specData);
+            } elseif ($modelClass && class_exists($modelClass)) {
+                $modelClass::create($specData);
+            }
+        }
+
+        foreach ($request->input('compatibilities', []) as $entry) {
+            $product->compatibleWith()->attach(
+                $entry['compatible_with_id'],
+                [
+                    'direction' => $entry['direction'] ?? 'bidirectional',
+                    'note'      => $entry['note'] ?? null,
+                ]
+            );
+        }
+
+        $this->syncImages($request, $product);
+
+        return to_route('products.index')->with('success', 'Produit créé.');
+    }
+
+    public function show(Product $product): Response
+    {
+        $product->load([
+            'brand','category','currency','taxRate','images',
+            'ram','processor','hardDrive','powerSupply','motherboard','networkCard',
+            'graphicCard','license','software','accessory','laptop','desktop','server',
+            'compatibleWith.category','isCompatibleWith.category',
+        ]);
+
+        $all = collect();
+
+        foreach ($product->compatibleWith as $p) {
+            $all->push((object)[
+                'id' => $p->id,
+                'name' => $p->name,
+                'category' => $p->category?->name,
+                'direction' => $p->pivot->direction,
+                'note' => $p->pivot->note,
+            ]);
+        }
+        foreach ($product->isCompatibleWith as $p) {
+            $all->push((object)[
+                'id' => $p->id,
+                'name' => $p->name,
+                'category' => $p->category?->name,
+                'direction' => $p->pivot->direction,
+                'note' => $p->pivot->note,
+            ]);
+        }
+
+        $allCompatibilities = $all->unique('id')->values();
+        $base = $product->toArray();
+        $config = config('catalog.specializations');
+
+        foreach ($config as $slug => $_) {
+            $relation = Str::camel(Str::singular($slug));
+            if ($product->relationLoaded($relation)) {
+                $base[$relation] = $product->getRelation($relation);
+            }
+        }
+
+        return Inertia::render('Products/Show', [
+            'product' => $base,
+            'allCompatibilities' => $allCompatibilities,
+        ]);
+    }
+
+    public function edit(Product $product): Response
+    {
+        $slug = $product->category?->slug;
+        $relations = ['brand', 'category', 'currency', 'taxRate', 'images'];
+
+        if ($slug) {
+            $relations[] = Str::camel(Str::singular($slug));
+        }
+
+        $product->load(array_merge($relations, ['compatibleWith', 'isCompatibleWith']));
+
+        $compatibilities = $product->compatibleWith
+            ->merge($product->isCompatibleWith)
+            ->values()
+            ->map(fn ($p) => [
+                'compatible_with_id' => $p->id,
+                'name' => $p->name,
+                'direction' => $p->pivot->direction,
+                'note' => $p->pivot->note,
+            ]);
+
+        return Inertia::render('Products/Edit', [
+            'brands' => Brand::orderBy('name')->get(['id', 'name']),
+            'product' => $product,
+            'categories' => Category::orderBy('name')->get(['id', 'name', 'slug']),
+            'currencies' => Currency::all(['code', 'symbol']),
+            'taxRates' => TaxRate::all(['id', 'name', 'rate']),
+            'compatibilities' => $compatibilities,
+        ]);
+    }
+
+    public function update(ProductRequest $request, Product $product): RedirectResponse
+    {
+        DB::transaction(function () use ($request, $product) {
+            $validated = $request->validated();
+            $product->update($validated);
+
+            $category = Category::findOrFail($validated['category_id']);
+            $slug = $category->slug;
+            $config = config('catalog.specializations');
+
+            if (isset($config[$slug]) && isset($validated['spec'])) {
+                $relation = Str::camel(Str::singular($slug));
+
+                if (method_exists($product, $relation)) {
+                    $product->{$relation}()->updateOrCreate(
+                        ['product_id' => $product->id],
+                        $validated['spec']
+                    );
+                }
+            }
+
+    // Méthodes e-commerce
+
+            $this->syncImages($request, $product);
+        });
+
+        return to_route('products.show', $product)->with('success', 'Produit mis à jour.');
+    }
+
+    public function destroy(Product $product): RedirectResponse
+    {
+        $product->delete();
+        return back()->with('success', 'Produit supprimé.');
+    }
+
+    public function restore(Product $product): RedirectResponse
+    {
+        $product->restore();
+        return back()->with('success', 'Produit restauré.');
+    }
+
+    protected function syncImages(ProductRequest $request, Product $product): void
+    {
+        if ($ids = $request->input('deleted_image_ids', [])) {
+            ProductImage::whereIn('id', $ids)->delete();
+        }
+        if ($ids = $request->input('restored_image_ids', [])) {
+            ProductImage::withTrashed()->whereIn('id', $ids)->restore();
+        }
+
+        ProductImage::where('product_id', $product->id)
+            ->whereNull('deleted_at')
+            ->update(['is_primary' => false]);
+
+        $primaryIdx = (int) $request->input('primary_image_index', 0);
+        $globalIdx = 0;
+        $primaryPath = null;
+
+        if ($request->hasFile('images')) {
+            foreach ($request->file('images') as $file) {
+                $path = $file->store("products/{$product->id}", 'public');
+                $isPrimary = $globalIdx === $primaryIdx;
+
+                $product->images()->create([
+                    'path' => $path,
+                    'is_primary' => $isPrimary,
+                ]);
+    // Méthodes pour le système d'attributs flexibles
+    public function getAttributeValue(string $attributeSlug)
+    {
+        $value = $this->attributeValues()
+            ->whereHas('attribute', function ($q) use ($attributeSlug) {
+                $q->where('slug', $attributeSlug);
+            })
+            ->first();
+
+        return $value ? $value->getTypedValueAttribute() : null;
+    }
+
+    public function setAttributeValue(string $attributeSlug, $value): void
+    {
+        $attribute = CategoryAttribute::where('slug', $attributeSlug)
+            ->whereHas('category', function ($q) {
+                $q->where('id', $this->category_id);
+            })
+            ->first();
+
+        if (!$attribute) {
+            return;
+        }
+
+        // Convertir la valeur selon le type
+        $convertedValue = match ($attribute->type) {
+            'multiselect' => is_array($value) ? json_encode($value) : $value,
+            'boolean' => $value ? '1' : '0',
+            'date' => $value instanceof \Carbon\Carbon ? $value->toDateString() : $value,
+            default => (string) $value,
+        };
+            }
+        $this->attributeValues()->updateOrCreate(
+            ['attribute_id' => $attribute->id],
+            ['value' => $convertedValue]
+        );
+    }
+
+    public function getAttributesForCategory(): \Illuminate\Support\Collection
+    {
+        if (!$this->category) {
+            return collect();
+        }
+
+        return $this->category->attributes()
+            ->active()
+            ->with(['options' => function ($q) {
+                $q->active()->orderBy('sort_order');
+            }])
+            ->orderBy('sort_order')
+            ->get()
+            ->map(function ($attribute) {
+                $value = $this->attributeValues()
+                    ->where('attribute_id', $attribute->id)
+                    ->first();
+
+                $attribute->current_value = $value ? $value->getTypedValueAttribute() : null;
+                $attribute->formatted_value = $value ? $value->getFormattedValueAttribute() : null;
+                
+                return $attribute;
+            });
+    }
+        }
+    // Boot events
+
+        $existing = $product->images()
+            ->whereNull('deleted_at')
+            ->orderBy('id')
+            ->get();
+
+        foreach ($existing as $img) {
+            $isPrimary = $globalIdx === $primaryIdx;
+            if ($isPrimary) {
+                $img->update(['is_primary' => true]);
+                $primaryPath = $img->path;
+            }
+            $globalIdx++;
+        }
+
+        if (!$primaryPath && $first = $existing->first()) {
+    
+    // Logs d'activité (Spatie)
+
+        if ($primaryPath) {
+            $product->updateQuietly(['image_main' => $primaryPath]);
+        }
+    }
+
+    public function compatibleList()
+    {
+        $machineSlugs = ['desktop', 'desktops', 'laptop', 'laptops', 'server', 'servers'];
+
+        return Product::query()
+            ->select('products.id', 'products.name')
+            ->join('categories', 'categories.id', '=', 'products.category_id')
+            ->whereIn('categories.slug', $machineSlugs)
+            ->whereNull('products.deleted_at')
+            ->orderBy('products.name')
+            ->get();
+    }
 }
+
+    // Nouvelles relations pour le système flexible
+    public function attributeValues(): HasMany
+    {
+        return $this->hasMany(ProductAttributeValue::class);
+    }
+
+    public function compatibilities(): HasMany { return $this->hasMany(ProductCompatibility::class); }
+
+    // Compatibilités via pivot (soft-delete inclus)
