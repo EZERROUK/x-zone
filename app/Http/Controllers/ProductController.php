@@ -389,7 +389,7 @@ class ProductController extends Controller
             if (isset($validated['attributes'])) {
                 foreach ($validated['attributes'] as $attributeSlug => $value) {
                     if ($value !== null && $value !== '') {
-                        $product->setAttributeValue($attributeSlug, $value);
+                        $product->setCustomAttributeValue($attributeSlug, $value);
                     } else {
                         // Supprimer la valeur si elle est vide
                         $product->attributeValues()
