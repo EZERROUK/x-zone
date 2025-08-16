@@ -90,7 +90,12 @@ class CategoryAttribute extends Model
             case 'multiselect':
                 $validOptions = $this->options->pluck('value')->toArray();
                 if (!empty($validOptions)) {
-                    $rules[] = 'in:' . implode(',', $validOptions);
+                    if ($this->type === 'multiselect') {
+                        $rules[] = 'array';
+                        $rules[] = 'in:' . implode(',', $validOptions);
+                    } else {
+                        $rules[] = 'in:' . implode(',', $validOptions);
+                    }
                 }
                 break;
             default:

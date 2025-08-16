@@ -10,10 +10,10 @@ class DatabaseSeeder extends Seeder
     {
         $this->call([
             RolePermissionSeeder::class,
-            CategorySeeder::class,
             CurrencySeeder::class,
             TaxRateSeeder::class,
             BrandSeeder::class,
+            CategorySeeder::class,  // Après brands pour les relations
             ProductSeeder::class,
             ProviderSeeder::class,
             StockMovementReasonSeeder::class,
