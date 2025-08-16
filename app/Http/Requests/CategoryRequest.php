@@ -42,6 +42,20 @@ class CategoryRequest extends FormRequest
             'meta_description' => 'nullable|string|max:500',
             'is_active' => 'boolean',
             'sort_order' => 'nullable|integer|min:0',
+            
+            // Attributs (facultatifs lors de la création)
+            'attributes' => ['nullable', 'array'],
+            'attributes.*.name' => ['required_with:attributes', 'string', 'max:255'],
+            'attributes.*.slug' => ['nullable', 'string', 'max:255'],
+            'attributes.*.type' => ['required_with:attributes', 'in:text,textarea,number,decimal,boolean,select,multiselect,date,url,email'],
+            'attributes.*.options' => ['nullable', 'array'],
+            'attributes.*.unit' => ['nullable', 'string', 'max:20'],
+            'attributes.*.description' => ['nullable', 'string'],
+            'attributes.*.is_required' => ['nullable', 'boolean'],
+            'attributes.*.is_filterable' => ['nullable', 'boolean'],
+            'attributes.*.is_searchable' => ['nullable', 'boolean'],
+            'attributes.*.show_in_listing' => ['nullable', 'boolean'],
+            'attributes.*.sort_order' => ['nullable', 'integer'],
         ];
     }
 
